@@ -1,8 +1,9 @@
 ﻿@{
-    ViewData["Title"] = "Home Page";
+    ViewData["Title"] = "LINE Login";
 }
 
 <div class="text-center">
-    <h1 class="display-4">Welcome</h1>
-    <p>Learn about <a href="https://learn.microsoft.com/aspnet/core">building Web apps with ASP.NET Core</a>.</p>
+    <h1 class="display-6">LINE Login 測試</h1>
+    <p>授權後會寫入 server log，再跳轉 reservation_v2。</p>
+    <a class="btn btn-success" asp-controller="Line" asp-action="Login">用 LINE 登入</a>
 </div>
