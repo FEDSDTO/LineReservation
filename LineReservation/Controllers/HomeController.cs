@@ -8,12 +8,10 @@ namespace LineReservation.Controllers
 {
     public class HomeController : Controller
     {
-        private readonly ILogger<HomeController> _logger;
         private readonly Func_Log _fileLog;
 
-        public HomeController(ILogger<HomeController> logger, Func_Log fileLog)
+        public HomeController(Func_Log fileLog)
         {
-            _logger = logger;
             _fileLog = fileLog;
         }
 
@@ -34,7 +32,6 @@ namespace LineReservation.Controllers
             if (feature?.Error != null)
             {
                 var msg = $"Unhandled exception at {feature.Path}: {feature.Error}";
-                _logger.LogError(feature.Error, "{Message}", msg);
                 _fileLog.SystemErrorLog_Txt(msg);
             }
 

@@ -1,23 +1,18 @@
 using LineReservation.Models;
 using LineReservation.Service;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<LineLoginOptions>(
     builder.Configuration.GetSection(LineLoginOptions.SectionName));
 
+builder.Services.AddDbContext<FEDSMBRContext>(options =>
+    options.UseSqlServer(builder.Configuration.GetConnectionString("FEDSMBR")));
+
 builder.Services.AddSingleton<Func_Log>();
 builder.Services.AddHttpClient<LineLoginService>();
 builder.Services.AddControllersWithViews();
-builder.Services.AddDistributedMemoryCache();
-builder.Services.AddSession(options =>
-{
-    options.Cookie.Name = ".LineReservation.Session";
-    options.Cookie.HttpOnly = true;
-    options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-    options.Cookie.SameSite = SameSiteMode.Lax;
-    options.IdleTimeout = TimeSpan.FromMinutes(10);
-});
 
 var app = builder.Build();
 
@@ -33,7 +28,6 @@ if (!app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseStaticFiles();
 app.UseRouting();
-app.UseSession();
 app.UseAuthorization();
 
 app.MapControllerRoute(

@@ -1,6 +1,7 @@
 ﻿using LineReservation.Models;
 using LineReservation.Service;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
 namespace LineReservation.Controllers
@@ -13,18 +14,18 @@ namespace LineReservation.Controllers
 
         private readonly LineLoginService _line;
         private readonly LineLoginOptions _options;
-        private readonly ILogger<LineController> _logger;
+        private readonly FEDSMBRContext _db;
         private readonly Func_Log _fileLog;
 
         public LineController(
             LineLoginService line,
             IOptions<LineLoginOptions> options,
-            ILogger<LineController> logger,
+            FEDSMBRContext db,
             Func_Log fileLog)
         {
             _line = line;
             _options = options.Value;
-            _logger = logger;
+            _db = db;
             _fileLog = fileLog;
         }
 
@@ -39,26 +40,21 @@ namespace LineReservation.Controllers
                 {
                     var msg =
                         $"LINE Login 設定不完整。ChannelId空={string.IsNullOrWhiteSpace(_options.ChannelId)}, RedirectUri空={string.IsNullOrWhiteSpace(_options.RedirectUri)}, ChannelSecret空={string.IsNullOrWhiteSpace(_options.ChannelSecret)}";
-                    _logger.LogError("{Message}", msg);
                     _fileLog.SystemErrorLog_Txt(msg);
                     return Content("LINE Login 設定未載入，請確認網站目錄的 appsettings.json 有 LineLogin 區段後回收 IIS。");
                 }
 
                 var state = Guid.NewGuid().ToString("N");
                 var nonce = Guid.NewGuid().ToString("N");
-                HttpContext.Session.SetString(StateKey, state);
-                HttpContext.Session.SetString(NonceKey, nonce);
+                Response.Cookies.Append(StateKey, state, LoginCookieOptions());
+                Response.Cookies.Append(NonceKey, nonce, LoginCookieOptions());
 
                 var url = _line.BuildAuthorizeUrl(state, nonce);
-                var infoMsg = $"Redirect to LINE authorize. redirect_uri={_options.RedirectUri}";
-                _logger.LogInformation("{Message}", infoMsg);
-                _fileLog.SystemLog_Txt(infoMsg);
                 return Redirect(url);
             }
             catch (Exception ex)
             {
                 var msg = $"LINE login exception: {ex}";
-                _logger.LogError(ex, "{Message}", msg);
                 _fileLog.SystemErrorLog_Txt(msg);
                 return Content("LINE 登入發生錯誤，請查看 SystemErrorLog。");
             }
@@ -75,15 +71,14 @@ namespace LineReservation.Controllers
             if (!string.IsNullOrWhiteSpace(error))
             {
                 var msg = $"LINE callback error={error}, description={error_description}";
-                _logger.LogWarning("{Message}", msg);
                 _fileLog.SystemErrorLog_Txt(msg);
                 return Content($"LINE 授權失敗：{error} {error_description}");
             }
 
-            var expectedState = HttpContext.Session.GetString(StateKey);
-            var expectedNonce = HttpContext.Session.GetString(NonceKey) ?? "";
-            HttpContext.Session.Remove(StateKey);
-            HttpContext.Session.Remove(NonceKey);
+            var expectedState = Request.Cookies[StateKey];
+            var expectedNonce = Request.Cookies[NonceKey] ?? "";
+            Response.Cookies.Delete(StateKey, DeleteCookieOptions());
+            Response.Cookies.Delete(NonceKey, DeleteCookieOptions());
 
             if (string.IsNullOrWhiteSpace(code) ||
                 string.IsNullOrWhiteSpace(state) ||
@@ -91,25 +86,75 @@ namespace LineReservation.Controllers
             {
                 var msg =
                     $"LINE callback invalid. hasCode={!string.IsNullOrWhiteSpace(code)}, stateMatch={string.Equals(state, expectedState, StringComparison.Ordinal)}";
-                _logger.LogWarning("{Message}", msg);
                 _fileLog.SystemErrorLog_Txt(msg);
                 return Content("LINE callback 驗證失敗（code/state）。");
             }
 
+            string? lineUserId;
             try
             {
-                await _line.LogAllTokenDataAsync(code, expectedNonce, ct);
+                lineUserId = await _line.LogAllTokenDataAsync(code, expectedNonce, ct);
             }
             catch (Exception ex)
             {
                 var msg = $"LINE callback exception: {ex.Message}";
-                _logger.LogError(ex, "{Message}", msg);
                 _fileLog.SystemErrorLog_Txt(msg);
                 return Content("LINE 換 token 或寫 log 失敗。");
             }
 
-            _fileLog.SystemLog_Txt("LINE callback success, redirect to " + _options.SuccessRedirectUrl);
-            return Redirect(_options.SuccessRedirectUrl);
+            if (string.IsNullOrWhiteSpace(lineUserId))
+            {
+                _fileLog.SystemErrorLog_Txt("LINE profile userId is empty.");
+                return Content("無法取得 LINE userId。");
+            }
+
+            try
+            {
+                var member = await _db.Members.AsNoTracking()
+                    .FirstOrDefaultAsync(m => m.LineId == lineUserId, ct);
+
+                if (member == null)
+                {
+                    _fileLog.SystemErrorLog_Txt($"Member not found. LineId={lineUserId}");
+                    return Content("找不到對應會員。");
+                }
+
+                var memberToken = await _db.MemberTokens.AsNoTracking()
+                    .Where(t => t.MemberId == member.Id && t.EntityStatus == 1)
+                    .OrderByDescending(t => t.ExpireDate)
+                    .ThenByDescending(t => t.Id)
+                    .FirstOrDefaultAsync(ct);
+
+                if (memberToken == null)
+                {
+                    _fileLog.SystemErrorLog_Txt($"MemberToken not found. MemberId={member.Id}");
+                    return Content("找不到有效會員憑證。");
+                }
+
+                var redirectUrl = _options.SuccessRedirectUrl + memberToken.Token.ToString("D");
+                _fileLog.SystemLog_Txt($"LINE callback success, MemberId={member.Id}, redirect to {redirectUrl}");
+                return Redirect(redirectUrl);
+            }
+            catch (Exception ex)
+            {
+                var msg = $"Member mapping exception: {ex.Message}";
+                _fileLog.SystemErrorLog_Txt(msg);
+                return Content("查詢會員憑證失敗。");
+            }
         }
+
+        private CookieOptions LoginCookieOptions() => new()
+        {
+            HttpOnly = true,
+            Secure = Request.IsHttps,
+            SameSite = SameSiteMode.Lax,
+            Path = "/",
+            MaxAge = TimeSpan.FromMinutes(10)
+        };
+
+        private static CookieOptions DeleteCookieOptions() => new()
+        {
+            Path = "/"
+        };
     }
 }

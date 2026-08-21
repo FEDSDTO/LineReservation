@@ -1,6 +1,4 @@
-﻿using System.Diagnostics;
-using System.Text;
-using System.Text.Json;
+﻿using System.Text.Json;
 using LineReservation.Models;
 using Microsoft.Extensions.Options;
 
@@ -10,18 +8,15 @@ namespace LineReservation.Service
     {
         private readonly HttpClient _http;
         private readonly LineLoginOptions _options;
-        private readonly ILogger<LineLoginService> _logger;
         private readonly Func_Log _fileLog;
 
         public LineLoginService(
             HttpClient http,
             IOptions<LineLoginOptions> options,
-            ILogger<LineLoginService> logger,
             Func_Log fileLog)
         {
             _http = http;
             _options = options.Value;
-            _logger = logger;
             _fileLog = fileLog;
         }
 
@@ -43,58 +38,26 @@ namespace LineReservation.Service
                        $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
         }
 
-        public async Task LogAllTokenDataAsync(string code, string expectedNonce, CancellationToken ct)
+        public async Task<string?> LogAllTokenDataAsync(string code, string expectedNonce, CancellationToken ct)
         {
-            var swAll = Stopwatch.StartNew();
+            _ = expectedNonce;
 
             var token = await ExchangeCodeAsync(code, ct);
+            if (string.IsNullOrWhiteSpace(token.AccessToken))
+                throw new InvalidOperationException("LINE access_token is empty.");
 
-            Info(
-                $"LINE token response: token_type={token.TokenType}, expires_in={token.ExpiresIn}, scope={token.Scope}, access_token={Mask(token.AccessToken)}, refresh_token={Mask(token.RefreshToken)}, id_token={Mask(token.IdToken)}");
+            var profileJson = await GetStringAsync("https://api.line.me/v2/profile", token.AccessToken, ct);
+            var lineUserId = ParseProfileUserId(profileJson);
+            _fileLog.SystemLog_Txt($"LINE profile userId={lineUserId}");
+            return lineUserId;
+        }
 
-            if (!string.IsNullOrWhiteSpace(token.AccessToken))
-            {
-                LogJwtIfPossible("access_token", token.AccessToken);
-
-                var verifyJson = await TimedGetAsync(
-                    "verify",
-                    "https://api.line.me/oauth2/v2.1/verify?access_token=" + Uri.EscapeDataString(token.AccessToken),
-                    bearer: null,
-                    ct);
-                Info("LINE verify access_token: " + verifyJson);
-
-                var profileJson = await TimedGetAsync(
-                    "profile",
-                    "https://api.line.me/v2/profile",
-                    bearer: token.AccessToken,
-                    ct);
-                Info("LINE profile: " + profileJson);
-
-                var userInfoJson = await TimedGetAsync(
-                    "userinfo",
-                    "https://api.line.me/oauth2/v2.1/userinfo",
-                    bearer: token.AccessToken,
-                    ct);
-                Info("LINE userinfo: " + userInfoJson);
-            }
-
-            if (!string.IsNullOrWhiteSpace(token.IdToken))
-            {
-                var payload = DecodeJwtPayload(token.IdToken);
-                Info("LINE id_token payload: " + payload.GetRawText());
-
-                if (payload.TryGetProperty("nonce", out var nonceEl))
-                {
-                    var nonce = nonceEl.GetString();
-                    if (!string.Equals(nonce, expectedNonce, StringComparison.Ordinal))
-                    {
-                        Error($"LINE id_token nonce mismatch. expected={expectedNonce}, actual={nonce}");
-                    }
-                }
-            }
-
-            swAll.Stop();
-            _fileLog.SystemPerformance_txt($"LogAllTokenDataAsync elapsed={swAll.ElapsedMilliseconds}ms");
+        private static string? ParseProfileUserId(string profileJson)
+        {
+            using var doc = JsonDocument.Parse(profileJson);
+            return doc.RootElement.TryGetProperty("userId", out var userIdEl)
+                ? userIdEl.GetString()
+                : null;
         }
 
         private async Task<LineTokenResponse> ExchangeCodeAsync(string code, CancellationToken ct)
@@ -108,28 +71,14 @@ namespace LineReservation.Service
                 ["client_secret"] = _options.ChannelSecret
             });
 
-            var sw = Stopwatch.StartNew();
             using var res = await _http.PostAsync("https://api.line.me/oauth2/v2.1/token", content, ct);
             var body = await res.Content.ReadAsStringAsync(ct);
-            sw.Stop();
-            _fileLog.SystemPerformance_txt($"LINE token HTTP elapsed={sw.ElapsedMilliseconds}ms status={(int)res.StatusCode}");
-
-            Info($"LINE token HTTP {(int)res.StatusCode}: {MaskSecretsInJson(body)}");
 
             if (!res.IsSuccessStatusCode)
-                throw new InvalidOperationException($"LINE token exchange failed: {(int)res.StatusCode} {MaskSecretsInJson(body)}");
+                throw new InvalidOperationException($"LINE token exchange failed: {(int)res.StatusCode}");
 
             return JsonSerializer.Deserialize<LineTokenResponse>(body)
                    ?? throw new InvalidOperationException("LINE token response is empty.");
-        }
-
-        private async Task<string> TimedGetAsync(string name, string url, string? bearer, CancellationToken ct)
-        {
-            var sw = Stopwatch.StartNew();
-            var result = await GetStringAsync(url, bearer, ct);
-            sw.Stop();
-            _fileLog.SystemPerformance_txt($"LINE {name} HTTP elapsed={sw.ElapsedMilliseconds}ms");
-            return result;
         }
 
         private async Task<string> GetStringAsync(string url, string? bearer, CancellationToken ct)
@@ -140,80 +89,9 @@ namespace LineReservation.Service
 
             using var res = await _http.SendAsync(req, ct);
             var body = await res.Content.ReadAsStringAsync(ct);
-            return $"HTTP {(int)res.StatusCode} {body}";
-        }
-
-        private void LogJwtIfPossible(string name, string value)
-        {
-            try
-            {
-                var payload = DecodeJwtPayload(value);
-                Info($"LINE {name} JWT payload: {payload.GetRawText()}");
-            }
-            catch (Exception ex)
-            {
-                Info($"LINE {name} is not a JWT (or cannot decode): {ex.Message}");
-            }
-        }
-
-        private void Info(string message)
-        {
-            _logger.LogInformation("{Message}", message);
-            _fileLog.SystemLog_Txt(message);
-        }
-
-        private void Error(string message)
-        {
-            _logger.LogWarning("{Message}", message);
-            _fileLog.SystemErrorLog_Txt(message);
-        }
-
-        private static JsonElement DecodeJwtPayload(string jwt)
-        {
-            var parts = jwt.Split('.');
-            if (parts.Length < 2)
-                throw new FormatException("Not a JWT.");
-
-            var json = Encoding.UTF8.GetString(Base64UrlDecode(parts[1]));
-            return JsonDocument.Parse(json).RootElement.Clone();
-        }
-
-        private static byte[] Base64UrlDecode(string input)
-        {
-            var s = input.Replace('-', '+').Replace('_', '/');
-            switch (s.Length % 4)
-            {
-                case 2: s += "=="; break;
-                case 3: s += "="; break;
-            }
-            return Convert.FromBase64String(s);
-        }
-
-        private static string Mask(string? value)
-        {
-            if (string.IsNullOrEmpty(value)) return "(null)";
-            if (value.Length <= 12) return $"*** (len={value.Length})";
-            return $"{value[..6]}...{value[^6..]} (len={value.Length})";
-        }
-
-        private static string MaskSecretsInJson(string body)
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(body);
-                var dict = new Dictionary<string, object?>();
-                foreach (var p in doc.RootElement.EnumerateObject())
-                {
-                    dict[p.Name] = p.Name is "access_token" or "refresh_token" or "id_token"
-                        ? Mask(p.Value.GetString())
-                        : p.Value.ToString();
-                }
-                return JsonSerializer.Serialize(dict);
-            }
-            catch
-            {
-                return body;
-            }
+            if (!res.IsSuccessStatusCode)
+                throw new InvalidOperationException($"LINE profile failed: {(int)res.StatusCode}");
+            return body;
         }
     }
 }

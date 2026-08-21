@@ -4,7 +4,7 @@ namespace LineReservation.Service
 {
     public class Func_Log
     {
-        private const string BaseDir = @"C:\Website\LineReservation\Log";
+        private const string BaseDir = @"D:\Website\LineReservation\Log";
         private static readonly object FileLock = new();
 
         public void SystemLog_Txt(string ex)
@@ -18,13 +18,6 @@ namespace LineReservation.Service
         {
             Write(Path.Combine(BaseDir, "SystemErrorLog"),
                 DateTime.Now.ToString("yyyy-MM-dd") + " - LineReservation-SystemErrorLog.txt",
-                ex);
-        }
-
-        public void SystemPerformance_txt(string ex)
-        {
-            Write(Path.Combine(BaseDir, "SystemPerformance"),
-                DateTime.Now.ToString("yyyy-MM-dd") + " - LineReservation_SystemPerformance.txt",
                 ex);
         }
 
